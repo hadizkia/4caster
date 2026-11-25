@@ -13,7 +13,7 @@ from pathlib import Path
 from cryptography.fernet import Fernet
 
 ROOT = Path(__file__).resolve().parent
-FILES = ["bot.py", "forecast.py", "llm.py", "wxkit.py", "sandbox.py", "requirements-app.txt"]
+FILES = ["bot.py", "forecast.py", "llm.py", "wxkit.py", "sandbox.py", "agro.py", "requirements-app.txt"]
 DIRS = ["fonts"]
 
 

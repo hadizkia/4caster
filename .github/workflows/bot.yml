@@ -51,7 +51,16 @@ jobs:
         id: peek
         env:
           LISTEN: ${{ inputs.chain == '1' && '240' || '0' }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
+          day=$(date -u +%F); echo "day=$day" >> "$GITHUB_OUTPUT"
+          # the daily refresh + farm alerts are due after 02:15 UTC until a run has done them today
+          if [ "$TASK" = "poll" ] && [ "$(date -u +%H%M)" -ge 215 ] \
+             && [ -z "$(gh cache list --key "daily-$day" --json key -q '.[].key' 2>/dev/null)" ]; then
+            TASK=refresh
+          fi
+          echo "task=$TASK" >> "$GITHUB_OUTPUT"
           if [ "$TASK" = "refresh" ]; then echo "go=true" >> "$GITHUB_OUTPUT"; exit 0; fi
           peek() {  # number of waiting updates; long-polls up to $1 seconds and confirms nothing
             curl -s --max-time $(( $1 + 20 )) \
@@ -112,8 +121,20 @@ jobs:
       - name: Run bot
         if: steps.peek.outputs.go == 'true'
         run: |
-          if [ "$TASK" = "refresh" ]; then python run.py refresh
+          if [ "${{ steps.peek.outputs.task }}" = "refresh" ]; then python run.py refresh
           else python run.py poll --idle 600 --max-runtime 3600; fi
+
+      - name: Mark the daily job as done
+        if: always() && steps.peek.outputs.task == 'refresh'
+        run: mkdir -p cache && date -u > cache/.daily
+
+      - name: Save daily marker
+        if: always() && steps.peek.outputs.task == 'refresh'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: cache/.daily
+          key: daily-${{ steps.peek.outputs.day }}
 
       - name: Save bot state
         if: always() && steps.peek.outputs.go == 'true' && hashFiles('cache/state.bin') != ''
@@ -135,7 +156,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          for spec in state-:3 wxdata-:2; do
+          for spec in state-:3 wxdata-:2 daily-:3; do
             prefix=${spec%%:*}; keep=${spec##*:}
             gh cache list --key "$prefix" --sort created_at --order desc --limit 100 --json id -q '.[].id' \
               | tail -n +$((keep + 1)) | xargs -r -n1 gh cache delete || true
