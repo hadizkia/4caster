@@ -3,8 +3,8 @@ name: 4caster bot
 # Every 5 minutes: a quick check for new Telegram messages. Only when there are some does the job set up Python
 # and answer them, staying awake 10 minutes after the last message so follow-ups are answered at once.
 # Daily at 02:15 UTC: download the newest model run and draw the standard products.
-# Watchdog: GitHub's scheduler can go quiet for a while. If no scheduled run has happened for 30 minutes, each run
-# starts the next check itself ("chain" mode: listen to Telegram for ~4 minutes, then hand over), until it returns.
+# GitHub's scheduler can go quiet for hours, so every run also queues the next check itself ("chain" mode: listen
+# to Telegram for ~4 minutes, then hand over). The cron entries remain as a backup to restart the chain.
 on:
   schedule:
     - cron: "*/5 * * * *"
@@ -169,17 +169,25 @@ jobs:
               && git push "https://x-access-token:${GH_TOKEN}@github.com/${GH_REPO}.git" HEAD:main || true
           fi
 
-      - name: Watchdog (start the next check if the schedule is quiet)
+      - name: Keep the next check queued
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          last=$(gh run list --workflow bot.yml --event schedule --limit 1 --json createdAt -q '.[0].createdAt // ""')
-          age=999999; [ -n "$last" ] && age=$(( $(date +%s) - $(date -d "$last" +%s) ))
-          if [ "$age" -gt 1800 ]; then
-            echo "schedule quiet for ${age}s: starting the next check"
-            gh workflow run bot.yml -f task=poll -f chain=1
+          # GitHub's scheduler is unreliable (it can skip hours), so every run makes sure one follow-up check
+          # is waiting; the concurrency group keeps it to one at a time.
+          waiting=0
+          for st in queued pending waiting requested; do
+            n=$(gh run list --workflow bot.yml --status "$st" --json databaseId -q 'length' 2>/dev/null || echo 0)
+            waiting=$(( waiting + n ))
+          done
+          if [ "$waiting" -eq 0 ]; then
+            # never hand over faster than every 3 minutes (protects against a fast failure loop)
+            started=$(gh run view "$GITHUB_RUN_ID" --json createdAt -q .createdAt)
+            age=$(( $(date +%s) - $(date -d "$started" +%s) ))
+            [ "$age" -lt 180 ] && sleep $(( 180 - age ))
+            echo "starting the next check"; gh workflow run bot.yml -f task=poll -f chain=1
           else
-            echo "schedule active (last run ${age}s ago)"
+            echo "a check is already waiting"
           fi
