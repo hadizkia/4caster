@@ -1,0 +1,9 @@
+# Allow-list: only these files are ever committed. Everything else stays on this machine.
+/*
+!/.gitignore
+!/README.md
+!/requirements.txt
+!/run.py
+!/pack.py
+!/bundle.bin
+!/.github/

@@ -1,0 +1,136 @@
+name: 4caster bot
+
+# Every 5 minutes: a quick check for new Telegram messages. Only when there are some does the job set up Python
+# and answer them, staying awake 10 minutes after the last message so follow-ups are answered at once.
+# Daily at 02:15 UTC: download the newest model run and draw the standard products.
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+    - cron: "15 2 * * *"
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "poll = answer messages, refresh = download the newest model run"
+        type: choice
+        options: [poll, refresh]
+        default: poll
+
+concurrency:
+  group: wxbot            # one bot at a time (Telegram allows a single getUpdates reader)
+  cancel-in-progress: false
+
+permissions:
+  contents: write         # keep-alive commit: GitHub pauses schedules after 60 days without repository activity
+  actions: write          # delete old caches
+
+jobs:
+  bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      ADMIN_ID: ${{ secrets.ADMIN_ID }}
+      ALLOWED_IDS: ${{ secrets.ALLOWED_IDS }}
+      STATE_KEY: ${{ secrets.STATE_KEY }}
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      BUNDLE_KEY: ${{ secrets.BUNDLE_KEY }}
+      LLM_MODELS: ${{ vars.LLM_MODELS }}
+      WX_WORK: ${{ github.workspace }}/cache
+      CARTOPY_DATA_DIR: /tmp/cartopy
+      SANDBOX_USER: sbx
+      PYTHONWARNINGS: ignore
+      TASK: ${{ github.event.schedule == '15 2 * * *' && 'refresh' || inputs.task || 'poll' }}
+    steps:
+      - name: Check for new Telegram messages
+        id: peek
+        run: |
+          if [ "$TASK" = "refresh" ]; then echo "go=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          n=$(curl -s --max-time 25 "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?timeout=0&limit=1" \
+              | python3 -c 'import sys, json; print(len(json.load(sys.stdin).get("result", [])))' || echo 1)
+          echo "pending updates: $n"
+          if [ "$n" != "0" ]; then echo "go=true" >> "$GITHUB_OUTPUT"; else echo "go=false" >> "$GITHUB_OUTPUT"; fi
+
+      - uses: actions/checkout@v4
+        if: steps.peek.outputs.go == 'true'
+        with:
+          persist-credentials: false   # nothing on disk that a generated script could use
+
+      - uses: actions/setup-python@v5
+        if: steps.peek.outputs.go == 'true'
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install packages
+        if: steps.peek.outputs.go == 'true'
+        run: pip install -q -r requirements.txt
+
+      - name: Sandbox user for generated plotting scripts
+        if: steps.peek.outputs.go == 'true'
+        run: |
+          sudo useradd --create-home --shell /bin/bash sbx
+          chmod 700 "$HOME"
+          mkdir -p "$CARTOPY_DATA_DIR"
+
+      - name: Restore bot state
+        if: steps.peek.outputs.go == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: cache/state.bin
+          key: state-${{ github.run_id }}
+          restore-keys: state-
+
+      - name: Restore forecast data
+        if: steps.peek.outputs.go == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: cache/runs
+          key: wxdata-${{ github.run_id }}
+          restore-keys: wxdata-
+
+      - name: Map shapes
+        if: steps.peek.outputs.go == 'true'
+        uses: actions/cache@v4
+        with:
+          path: /tmp/cartopy
+          key: cartopy-naturalearth-v2
+
+      - name: Run bot
+        if: steps.peek.outputs.go == 'true'
+        run: |
+          if [ "$TASK" = "refresh" ]; then python run.py refresh
+          else python run.py poll --idle 600 --max-runtime 3600; fi
+
+      - name: Save bot state
+        if: always() && steps.peek.outputs.go == 'true' && hashFiles('cache/state.bin') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: cache/state.bin
+          key: state-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Save forecast data
+        if: always() && steps.peek.outputs.go == 'true' && hashFiles('cache/.wxdata_changed') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: cache/runs
+          key: wxdata-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Tidy caches, keep the schedule alive
+        if: always() && steps.peek.outputs.go == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          for spec in state-:3 wxdata-:2; do
+            prefix=${spec%%:*}; keep=${spec##*:}
+            gh cache list --key "$prefix" --sort created_at --order desc --limit 100 --json id -q '.[].id' \
+              | tail -n +$((keep + 1)) | xargs -r -n1 gh cache delete || true
+          done
+          if [ $(( $(date +%s) - $(git log -1 --format=%ct) )) -gt $(( 45 * 86400 )) ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            date -u +%F > .github/keepalive && git add .github/keepalive
+            git commit -m "keep-alive: scheduled workflow" \
+              && git push "https://x-access-token:${GH_TOKEN}@github.com/${GH_REPO}.git" HEAD:main || true
+          fi
