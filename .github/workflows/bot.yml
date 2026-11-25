@@ -3,6 +3,8 @@ name: 4caster bot
 # Every 5 minutes: a quick check for new Telegram messages. Only when there are some does the job set up Python
 # and answer them, staying awake 10 minutes after the last message so follow-ups are answered at once.
 # Daily at 02:15 UTC: download the newest model run and draw the standard products.
+# Watchdog: GitHub's scheduler can go quiet for a while. If no scheduled run has happened for 30 minutes, each run
+# starts the next check itself ("chain" mode: listen to Telegram for ~4 minutes, then hand over), until it returns.
 on:
   schedule:
     - cron: "*/5 * * * *"
@@ -14,6 +16,10 @@ on:
         type: choice
         options: [poll, refresh]
         default: poll
+      chain:
+        description: "internal: started by the watchdog"
+        type: string
+        default: "0"
 
 concurrency:
   group: wxbot            # one bot at a time (Telegram allows a single getUpdates reader)
@@ -43,10 +49,17 @@ jobs:
     steps:
       - name: Check for new Telegram messages
         id: peek
+        env:
+          LISTEN: ${{ inputs.chain == '1' && '240' || '0' }}
         run: |
           if [ "$TASK" = "refresh" ]; then echo "go=true" >> "$GITHUB_OUTPUT"; exit 0; fi
-          n=$(curl -s --max-time 25 "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?timeout=0&limit=1" \
-              | python3 -c 'import sys, json; print(len(json.load(sys.stdin).get("result", [])))' || echo 1)
+          peek() {  # number of waiting updates; long-polls up to $1 seconds and confirms nothing
+            curl -s --max-time $(( $1 + 20 )) \
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?timeout=$1&limit=1" \
+              | python3 -c 'import sys, json; print(len(json.load(sys.stdin).get("result", [])))' || echo 1
+          }
+          end=$(( $(date +%s) + LISTEN )); n=$(peek 0)
+          while [ "$n" = "0" ] && [ "$(date +%s)" -lt "$end" ]; do n=$(peek 50); done
           echo "pending updates: $n"
           if [ "$n" != "0" ]; then echo "go=true" >> "$GITHUB_OUTPUT"; else echo "go=false" >> "$GITHUB_OUTPUT"; fi
 
@@ -133,4 +146,19 @@ jobs:
             date -u +%F > .github/keepalive && git add .github/keepalive
             git commit -m "keep-alive: scheduled workflow" \
               && git push "https://x-access-token:${GH_TOKEN}@github.com/${GH_REPO}.git" HEAD:main || true
+          fi
+
+      - name: Watchdog (start the next check if the schedule is quiet)
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          last=$(gh run list --workflow bot.yml --event schedule --limit 1 --json createdAt -q '.[0].createdAt // ""')
+          age=999999; [ -n "$last" ] && age=$(( $(date +%s) - $(date -d "$last" +%s) ))
+          if [ "$age" -gt 1800 ]; then
+            echo "schedule quiet for ${age}s: starting the next check"
+            gh workflow run bot.yml -f task=poll -f chain=1
+          else
+            echo "schedule active (last run ${age}s ago)"
           fi
