@@ -6,7 +6,9 @@ A Telegram bot that draws weather-forecast maps and charts on request, running e
   plotting script, which runs in a sandbox (separate user, no secrets, time limit).
 - Forecast data: [Open-Meteo](https://open-meteo.com) (CC BY 4.0), several global models and ensembles.
 - Farm forecasts: frost and heat probabilities from ensembles, crop water need (FAO-56), spraying windows,
-  soil conditions, degree-days and chill hours, regional frost and water-need maps, and daily alerts.
+  soil conditions, degree-days, chill portions, frost-protection advice by growth stage, disease infection risk,
+  insect degree-day timing, an irrigation scheduler (FAO-56 water balance), livestock heat stress, dust and
+  thunderstorm warnings, 6-week and 6-month outlooks, rainfall versus normal, and daily alerts.
 - Every 5 minutes the workflow checks the bot for new messages and answers them; once a day it refreshes the
   model data. State and data live in the Actions cache; the state is encrypted.
 - Only users approved by the admin can use the bot.
